@@ -4,7 +4,11 @@
             [clojure.test :refer [deftest is are]]))
 
 (deftest test-cases
-  (are [input output] (= output (-> input subject/process-ops :tax))
+  ;; This test exercises the test cases provided in the requirements
+  ;; document.
+  ;;
+  ;; Note: all monetary values are in cents here.
+  (are [input output] (= output (subject/process-ops input))
     ;; Test case 1
     [{:operation "buy" :unit-cost 1000 :quantity 100}
      {:operation "sell" :unit-cost 1500 :quantity 50}
@@ -80,7 +84,12 @@
 (def multiline-json-output (slurp (io/resource "multiline-output.json")))
 
 (deftest test-integration
-  (is (= multiline-json-output
-         (with-out-str
-           (with-in-str multiline-json-input
-             (subject/run))))))
+  ;; This test exercises:
+  ;;   - independent processing of multiple lines
+  ;;   - JSON round-trip
+  ;;   - dollars/cents conversion round-trip
+  (is
+   (= multiline-json-output
+      (with-out-str
+        (with-in-str multiline-json-input
+          (subject/run))))))

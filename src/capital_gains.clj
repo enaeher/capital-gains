@@ -1,21 +1,21 @@
 (ns capital-gains
   (:require [clojure.data.json :as json]
-            [clojure.math :as math]
-            [clojure.pprint :refer [cl-format]])
-  (:import [java.math BigDecimal]))
+            [clojure.math :as math])
+  (:import [java.io BufferedReader]))
 
 (def ^:private ^:const small-transaction-limit 2000000) ; in cents
 (def ^:private ^:const capital-gains-tax-rate (/ 1 5)) ; as a ratio
 
 (def ^:private ^:const initial-state
-  {:tax           []
-   :quantity-held 0
-   :weighted-avg  0
-   :loss          0})
+  {:tax           [] ; accumulates the tax due on each operation
+   :loss          0  ; tracks the current total losses that can be applied to offset tax due
+   :quantity-held 0  ; tracks the current quantity of stocks held
+   :weighted-avg  0  ; tracks the current weighted average price paid for stocks held
+   })
 
 ;; Purchase handling
 
-(defn- calc-new-weighted-avg
+(defn- new-weighted-avg
   "Given:
     - a state with an existing cost basis and quantity of holdings
     - a purchase operation
@@ -35,7 +35,7 @@
       ;; no tax due at purchase time
       (update :tax conj {:tax 0})
       (update :quantity-held + quantity)
-      (assoc :weighted-avg (calc-new-weighted-avg state op))))
+      (assoc :weighted-avg (new-weighted-avg state op))))
 
 ;; Sale handling
 
@@ -43,15 +43,15 @@
   [{:keys [weighted-avg] :as state}
    {:keys [unit-cost quantity] :as _op}]
   (-> state
-      (update :tax conj {:tax 0})
       (update :quantity-held - quantity)
+      (update :tax conj {:tax 0})
       (update :loss + (* (- weighted-avg unit-cost) quantity))))
 
 (defn- process-sale-below-limit
   [state {:keys [quantity] :as _op}]
   (-> state
-      (update :tax conj {:tax 0})
-      (update :quantity-held - quantity)))
+      (update :quantity-held - quantity)
+      (update :tax conj {:tax 0})))
 
 (defn- process-sale-capital-gain
   [{:keys [loss weighted-avg] :as state}
@@ -61,22 +61,25 @@
         taxable-gain    (- profit deductible-loss)
         tax-due         (math/round (* taxable-gain capital-gains-tax-rate))]
       (-> state
-          (update :tax conj {:tax tax-due})
           (update :quantity-held - quantity)
+          (update :tax conj {:tax tax-due})
           (update :loss - deductible-loss))))
 
 (defn- process-sale
-  [{:keys [weighted-avg] :as state} {:keys [unit-cost quantity] :as op}]
-
+  [{:keys [weighted-avg] :as state}
+   {:keys [unit-cost quantity] :as op}]
   (cond
     ;; capital loss
-    (< unit-cost weighted-avg) (process-sale-capital-loss state op)
+    (< unit-cost weighted-avg)
+    (process-sale-capital-loss state op)
 
-    ;; small sale below 20,000
-    (<= (* unit-cost quantity) small-transaction-limit) (process-sale-below-limit state op)
+    ;; small sale below $20,000
+    (<= (* unit-cost quantity) small-transaction-limit)
+    (process-sale-below-limit state op)
 
     ;; taxable capital gain
-    :else (process-sale-capital-gain state op)))
+    :else
+    (process-sale-capital-gain state op)))
 
 ;; General operation handling
 
@@ -86,42 +89,28 @@
     "buy"  (process-purchase state op)
     "sell" (process-sale state op)))
 
-(defn- inbound-numeric-conversion
-  "Unit costs are read from JSON as doubles, but because we know the
-  required precision, we can convert to an integer number of cents for more
-  accurate math."
-  [op]
-  (update op :unit-cost (comp long (partial * 100))))
-
-(defn- outbound-numeric-conversion
-  "To write the resulting tax amount values to JSON, we divide by 100 to
-  convert back from cents to dollars, then cast to a BigDecimal with
-  scale set to 2 to ensure the correct formatting (xx.xx) by
-  data.json"
-  [tax]
-  (update tax :tax (comp #(.setScale % 2) bigdec #(/ % 100))))
-
 (defn process-ops
   [ops]
-  (reduce process-op initial-state ops))
+  (:tax (reduce process-op initial-state ops)))
 
-(defn process-line
-  [ops]
-  (->> ops
-       (map inbound-numeric-conversion)
-       process-ops
-       :tax
-       (map outbound-numeric-conversion)))
+;; CLI and JSON handling
+
+(defn- dollars->cents
+  [n]
+  (* n 100))
+
+(defn- cents->dollars
+  [n]
+  (/ n 100))
 
 (defn run
   ([_opts]
    (run))
   ([]
-   (loop [raw-line (read-line)]
-       (when raw-line
-         (-> raw-line
-             (json/read-str {:key-fn keyword})
-             process-line
-             (json/write-str)
-             (println))
-         (recur (read-line))))))
+   (doseq [line (line-seq (BufferedReader. *in*))]
+     (->> (json/read-str line {:key-fn keyword})
+          (map #(update % :unit-cost dollars->cents))
+          (process-ops)
+          (map #(update % :tax cents->dollars))
+          (json/write-str)
+          (println)))))
